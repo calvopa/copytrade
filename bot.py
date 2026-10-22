@@ -452,6 +452,8 @@ def main():
     app = Application.builder().token(token).build()
     app.bot_data["modo"] = cargar_modo()
     app.bot_data["leader_address"] = cargar_leader()
+    if app.bot_data["leader_address"]:
+        guardar_leader(app.bot_data["leader_address"])  # asegura que leader.json exista (lo lee el dashboard)
     app.bot_data["account_address"] = account_address
     app.bot_data["exchange"] = exchange
 
