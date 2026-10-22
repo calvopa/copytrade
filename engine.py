@@ -15,13 +15,16 @@ def pesos_leader(leader_pos: dict) -> dict:
     return {coin: p["margin_used"] / total for coin, p in leader_pos.items()}
 
 
-def calcular_acciones(leader_pos: dict, nuestras_pos: dict) -> dict:
+def calcular_acciones(leader_pos: dict, nuestras_pos: dict, baseline_coins: set | None = None) -> dict:
+    baseline_coins = baseline_coins or set()
     pesos = pesos_leader(leader_pos)
     abrir, cerrar = [], []
 
     for coin, p in leader_pos.items():
         if coin in nuestras_pos:
             continue  # v1: ya mirroreada, no se resizea
+        if coin in baseline_coins:
+            continue  # portfolio preexistente del leader — no se mirrorea
         peso = pesos.get(coin, 0)
         if peso <= 0:
             continue

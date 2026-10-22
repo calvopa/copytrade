@@ -34,6 +34,7 @@ log.propagate = False
 MODO_FILE     = _RUNTIME / "mode.json"
 LEADER_FILE   = _RUNTIME / "leader.json"
 META_FILE     = _RUNTIME / "mirror_meta.json"
+BASELINE_FILE = _RUNTIME / "leader_baseline.json"
 ART = timezone(timedelta(hours=-3))
 
 señales_pendientes: dict[str, dict] = {}  # id -> accion "abrir", para confirmacion en modo semi
@@ -78,6 +79,17 @@ def cargar_meta() -> dict:
 
 def guardar_meta(meta: dict):
     _escribir_json(META_FILE, meta)
+
+
+def cargar_baseline() -> dict:
+    """Coins que el leader YA tenia abiertas cuando se lo empezo a seguir —
+    se excluyen del mirror para siempre (no se mirrorea un portfolio
+    preexistente, solo lo que el leader abra de ahi en mas)."""
+    return _leer_json(BASELINE_FILE, {"leader": "", "coins": []})
+
+
+def fijar_baseline(leader_address: str, leader_pos: dict):
+    _escribir_json(BASELINE_FILE, {"leader": leader_address, "coins": list(leader_pos.keys())})
 
 
 def con_reintentos(fn, *args, intentos: int = 3, espera: int = 2, **kwargs):
@@ -199,7 +211,9 @@ async def ciclo(context: ContextTypes.DEFAULT_TYPE):
                 log.error(f"Error en stop-loss propio para {cierre['coin']}: {e}")
                 await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error cerrando {cierre['coin']} por stop-loss: {e}")
 
-    acciones = engine.calcular_acciones(leader_pos, nuestras_pos)
+    baseline = cargar_baseline()
+    baseline_coins = set(baseline["coins"]) if baseline.get("leader") == leader_address else set()
+    acciones = engine.calcular_acciones(leader_pos, nuestras_pos, baseline_coins)
 
     # Cierres (porque el leader salió) — siempre automaticos, salvo pausado
     if modo != "pausado":
@@ -222,6 +236,9 @@ async def ciclo(context: ContextTypes.DEFAULT_TYPE):
                 log.error(f"Error abriendo mirror {accion['coin']}: {e}")
                 await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error abriendo {accion['coin']}: {e}")
         elif modo == "semi":
+            ya_pendiente = any(v["coin"] == accion["coin"] for v in señales_pendientes.values())
+            if ya_pendiente:
+                continue  # ya se le pidio confirmacion por este coin, no duplicar
             señal_id = f"{accion['coin']}_{int(time.time())}"
             señales_pendientes[señal_id] = {**accion, "_ts": time.time()}
             lado = "LONG" if accion["is_buy"] else "SHORT"
@@ -276,10 +293,25 @@ async def cmd_leader(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not address.startswith("0x") or len(address) != 42:
         await update.message.reply_text("⚠️ Esa no parece una dirección válida (formato 0x... de 42 caracteres).")
         return
+
+    try:
+        info_leader = hl.crear_info_leader()
+        leader_pos = con_reintentos(hl.posiciones_de, info_leader, address)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ No pude leer las posiciones de esa dirección, no se cambió el leader: {e}")
+        return
+
     context.bot_data["leader_address"] = address
     guardar_leader(address)
-    await update.message.reply_text(f"✅ Leader actualizado a `{address}`", parse_mode="Markdown")
-    log.info(f"Leader cambiado a {address}")
+    fijar_baseline(address, leader_pos)
+    await update.message.reply_text(
+        f"✅ Leader actualizado a `{address}`\n\n"
+        f"Tiene {len(leader_pos)} posiciones abiertas ahora mismo — "
+        f"*no se van a mirrorear* (son su portfolio preexistente). "
+        f"Solo se copia lo que abra de acá en adelante.",
+        parse_mode="Markdown",
+    )
+    log.info(f"Leader cambiado a {address} — baseline fijado con {len(leader_pos)} posiciones excluidas")
 
 
 async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -396,6 +428,17 @@ def main():
     app.bot_data["leader_address"] = cargar_leader()
     app.bot_data["account_address"] = account_address
     app.bot_data["exchange"] = exchange
+
+    leader_address = app.bot_data["leader_address"]
+    baseline = cargar_baseline()
+    if leader_address and baseline.get("leader") != leader_address:
+        try:
+            info_leader = hl.crear_info_leader()
+            leader_pos = con_reintentos(hl.posiciones_de, info_leader, leader_address)
+            fijar_baseline(leader_address, leader_pos)
+            log.info(f"Baseline fijado al arrancar para {leader_address}: {len(leader_pos)} posiciones excluidas")
+        except Exception as e:
+            log.error(f"No se pudo fijar baseline al arrancar: {e}")
 
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("estado", cmd_estado))
