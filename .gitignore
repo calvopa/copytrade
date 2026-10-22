@@ -5,6 +5,8 @@
 mode.json
 leader.json
 mirror_meta.json
+leader_baseline.json
+closed_mirrors.csv
 heartbeat
 copytrade.log
 copytrade.log.*

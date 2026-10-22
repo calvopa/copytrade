@@ -1,3 +1,4 @@
+import csv
 import json
 import logging
 import os
@@ -31,10 +32,13 @@ _fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", 
 log.addHandler(_fh)
 log.propagate = False
 
-MODO_FILE     = _RUNTIME / "mode.json"
-LEADER_FILE   = _RUNTIME / "leader.json"
-META_FILE     = _RUNTIME / "mirror_meta.json"
-BASELINE_FILE = _RUNTIME / "leader_baseline.json"
+MODO_FILE       = _RUNTIME / "mode.json"
+LEADER_FILE     = _RUNTIME / "leader.json"
+META_FILE       = _RUNTIME / "mirror_meta.json"
+BASELINE_FILE   = _RUNTIME / "leader_baseline.json"
+CLOSED_FILE     = _RUNTIME / "closed_mirrors.csv"
+CLOSED_COLS     = ["timestamp_apertura", "timestamp_cierre", "coin", "lado", "leverage",
+                   "notional_usdc", "leader_entry_px", "pnl_usdc_aprox", "motivo"]
 ART = timezone(timedelta(hours=-3))
 
 señales_pendientes: dict[str, dict] = {}  # id -> accion "abrir", para confirmacion en modo semi
@@ -79,6 +83,15 @@ def cargar_meta() -> dict:
 
 def guardar_meta(meta: dict):
     _escribir_json(META_FILE, meta)
+
+
+def registrar_cierre(fila: dict):
+    existe = CLOSED_FILE.exists()
+    with open(CLOSED_FILE, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CLOSED_COLS, extrasaction="ignore")
+        if not existe:
+            writer.writeheader()
+        writer.writerow(fila)
 
 
 def cargar_baseline() -> dict:
@@ -160,11 +173,24 @@ async def _abrir_mirror(exchange, bot, chat_id: str, accion: dict, meta: dict):
     log.info(f"Mirror abierto: {coin} {lado} notional=${accion['notional_usdc']:.2f} lev={accion['leverage']}x")
 
 
-async def _cerrar_mirror(exchange, bot, chat_id: str, cierre: dict, meta: dict):
+async def _cerrar_mirror(exchange, bot, chat_id: str, cierre: dict, meta: dict, posicion_previa: dict | None = None):
     coin = cierre["coin"]
     con_reintentos(exchange.market_close, coin)
-    meta.pop(coin, None)
+    info_apertura = meta.pop(coin, {})
     guardar_meta(meta)
+
+    if posicion_previa:
+        registrar_cierre({
+            "timestamp_apertura": info_apertura.get("abierto_ts", ""),
+            "timestamp_cierre":   datetime.now(ART).isoformat(),
+            "coin":               coin,
+            "lado":               "LONG" if posicion_previa.get("is_long") else "SHORT",
+            "leverage":           info_apertura.get("nuestro_leverage", posicion_previa.get("leverage")),
+            "notional_usdc":      info_apertura.get("notional_usdc", posicion_previa.get("position_value")),
+            "leader_entry_px":    info_apertura.get("leader_entry_px", ""),
+            "pnl_usdc_aprox":     posicion_previa.get("unrealized_pnl", 0),
+            "motivo":             cierre.get("motivo", ""),
+        })
 
     motivo = {"leader_cerro": "el leader cerró su posición",
               "stop_loss_propio": "stop-loss propio",
@@ -206,7 +232,7 @@ async def ciclo(context: ContextTypes.DEFAULT_TYPE):
     if modo != "pausado":
         for cierre in engine.chequear_stop_loss(nuestras_pos):
             try:
-                await _cerrar_mirror(exchange, context.bot, chat_id, cierre, meta)
+                await _cerrar_mirror(exchange, context.bot, chat_id, cierre, meta, nuestras_pos.get(cierre["coin"]))
             except Exception as e:
                 log.error(f"Error en stop-loss propio para {cierre['coin']}: {e}")
                 await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error cerrando {cierre['coin']} por stop-loss: {e}")
@@ -220,7 +246,7 @@ async def ciclo(context: ContextTypes.DEFAULT_TYPE):
         for cierre in acciones["cerrar"]:
             if cierre["coin"] in meta or cierre["coin"] in nuestras_pos:
                 try:
-                    await _cerrar_mirror(exchange, context.bot, chat_id, cierre, meta)
+                    await _cerrar_mirror(exchange, context.bot, chat_id, cierre, meta, nuestras_pos.get(cierre["coin"]))
                 except Exception as e:
                     log.error(f"Error cerrando mirror {cierre['coin']}: {e}")
                     await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error cerrando {cierre['coin']}: {e}")
@@ -411,7 +437,7 @@ async def callback_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Cerrando {', '.join(coins)}...")
         for coin in coins:
             try:
-                await _cerrar_mirror(exchange, context.bot, chat_id, {"coin": coin, "motivo": "manual"}, meta)
+                await _cerrar_mirror(exchange, context.bot, chat_id, {"coin": coin, "motivo": "manual"}, meta, nuestras_pos.get(coin))
             except Exception as e:
                 log.error(f"Error en cierre manual {coin}: {e}")
                 await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error cerrando {coin}: {e}")
