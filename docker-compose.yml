@@ -1,0 +1,20 @@
+services:
+  bot:
+    build: .
+    container_name: copytrade-bot
+    command: python bot.py
+    env_file: .env
+    environment:
+      - RUNTIME_DIR=/data
+    volumes:
+      - copytrade_data:/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  copytrade_data:
+    name: copytrade_data

@@ -1,0 +1,4 @@
+hyperliquid-python-sdk>=0.10.0
+python-telegram-bot[job-queue]>=21.0
+python-dotenv>=1.0
+requests>=2.31

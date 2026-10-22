@@ -1,0 +1,15 @@
+# Secretos — nunca commitear
+.env
+
+# Runtime — generados en ejecución
+mode.json
+leader.json
+mirror_meta.json
+heartbeat
+copytrade.log
+copytrade.log.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
