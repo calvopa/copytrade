@@ -26,6 +26,7 @@ logging.basicConfig(
     level=logging.INFO,
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)  # la URL de cada request incluye el token de Telegram
 log = logging.getLogger(__name__)
 _fh = RotatingFileHandler(str(_RUNTIME / "copytrade.log"), maxBytes=5_000_000, backupCount=3)
 _fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
