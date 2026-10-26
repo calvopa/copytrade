@@ -106,6 +106,18 @@ Si alguna vez se lee al leader con el cliente equivocado, `posiciones_de()` devu
 silenciosamente (no tira error) — se ve en el log como "el leader nunca tiene posiciones",
 no como una excepción.
 
+## Gotcha: Hyperliquid responde 200 aunque rechace la orden
+
+`market_open`/`market_close` devuelven `{"status": "ok", ...}` con `statuses: [{"error": ...}]` (sin
+margen, tamaño mínimo) o `{"status": "err", "response": "User or API Wallet ... does not exist"}`
+— **no tiran excepción**. `_error_orden()` revisa eso; sin el chequeo (hasta el 26/10/2026) el bot
+anunciaba "Mirror abierto" y guardaba una posición que no existía. Además, al principio de cada
+ciclo se descarta la meta de coins sin posición real en la cuenta.
+
+Para chequear si la cuenta existe y tiene fondos:
+`curl -s https://api.hyperliquid-testnet.xyz/info -H 'Content-Type: application/json' -d '{"type":"userRole","user":"<HYPERLIQUID_ACCOUNT_ADDRESS>"}'`
+— `"missing"` = la cuenta nunca recibió un depósito (hay que cargarla con el faucet de testnet).
+
 ## Reglas críticas
 
 - **Nunca** `USE_TESTNET=false` sin pedido explícito del usuario

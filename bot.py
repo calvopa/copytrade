@@ -149,6 +149,23 @@ def _modo_label(modo: str) -> str:
 
 # ── Ejecucion ─────────────────────────────────────────────────────────────────
 
+def _error_orden(resultado) -> str | None:
+    """Motivo del rechazo si la orden no se ejecutó, None si se llenó.
+    El SDK devuelve {"status": "ok", "response": {"data": {"statuses": [{"filled": ...}]}}}
+    o, si falla, "status": "err" / un status con "error"."""
+    if not isinstance(resultado, dict):
+        return f"respuesta inesperada: {str(resultado)[:200]}"
+    if resultado.get("status") != "ok":
+        return str(resultado.get("response", resultado))[:200]
+    statuses = (resultado.get("response") or {}).get("data", {}).get("statuses", [])
+    for s in statuses:
+        if isinstance(s, dict) and "error" in s:
+            return str(s["error"])[:200]
+    if not any(isinstance(s, dict) and "filled" in s for s in statuses):
+        return f"la orden no se llenó: {str(statuses)[:200]}"
+    return None
+
+
 async def _abrir_mirror(exchange, bot, chat_id: str, accion: dict, meta: dict):
     coin = accion["coin"]
     px_actual = None
@@ -172,6 +189,13 @@ async def _abrir_mirror(exchange, bot, chat_id: str, accion: dict, meta: dict):
     resultado = con_reintentos(
         exchange.market_open, coin, accion["is_buy"], sz, None, config.SLIPPAGE,
     )
+    error = _error_orden(resultado)
+    if error:
+        # Hyperliquid responde 200 aunque rechace la orden (sin margen, cuenta inexistente, etc.):
+        # sin este chequeo se anunciaba "Mirror abierto" y se guardaba una posición que no existe.
+        log.error(f"Orden rechazada al abrir {coin}: {error}")
+        await bot.send_message(chat_id=chat_id, text=f"⚠️ No se pudo abrir {coin}: {error}")
+        return
 
     meta[coin] = {
         "abierto_ts":      datetime.now(ART).isoformat(),
@@ -199,7 +223,13 @@ async def _abrir_mirror(exchange, bot, chat_id: str, accion: dict, meta: dict):
 
 async def _cerrar_mirror(exchange, bot, chat_id: str, cierre: dict, meta: dict, posicion_previa: dict | None = None):
     coin = cierre["coin"]
-    con_reintentos(exchange.market_close, coin)
+    resultado = con_reintentos(exchange.market_close, coin)
+    # None = el SDK no encontró posición en la cuenta: no hay nada que cerrar, solo limpiar meta
+    error = _error_orden(resultado) if resultado is not None else None
+    if error:
+        log.error(f"Orden rechazada al cerrar {coin}: {error}")
+        await bot.send_message(chat_id=chat_id, text=f"⚠️ No se pudo cerrar {coin}: {error} — se reintenta en el próximo ciclo")
+        return
     info_apertura = meta.pop(coin, {})
     guardar_meta(meta)
 
@@ -251,6 +281,15 @@ async def ciclo(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error(f"Error leyendo estado de Hyperliquid: {e}")
         return
+
+    # Meta de posiciones que no existen en la cuenta (ej. una apertura rechazada antes del chequeo
+    # de _error_orden): se descarta para que no quede un "mirror" fantasma para siempre.
+    fantasmas = [c for c in meta if c not in nuestras_pos]
+    if fantasmas:
+        for c in fantasmas:
+            meta.pop(c)
+        guardar_meta(meta)
+        log.warning(f"Meta sin posición real descartada: {', '.join(fantasmas)}")
 
     # Stop-loss propio — corre siempre salvo pausado
     if modo != "pausado":
