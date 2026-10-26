@@ -72,6 +72,15 @@ ante datos corruptos, no un límite normal).
 Si el leader resizea una posición que ya estamos espejando, **v1 no lo replica** — queda en
 backlog. Si el leader la cierra del todo, cerramos la nuestra.
 
+### Baseline (portfolio preexistente del leader)
+
+Al arrancar o al cambiar de leader (`/leader`), las coins que el leader ya tenía abiertas se
+guardan en `leader_baseline.json` y **no se copian** (no entrar tarde a posiciones viejas).
+Cuando el leader cierra una de esas coins durante 3 ciclos seguidos (`CICLOS_PARA_LIBERAR`,
+evita que un vacío transitorio de la API libere todo de golpe), sale del baseline y su próxima
+apertura sí se copia. Antes del 26/10/2026 el baseline era para siempre: un leader que nunca
+cierra sus posiciones (caso del primer leader de CT1, siempre en BTC/ETH/XRP) no se copiaba nunca.
+
 ### Seguridad propia
 
 El leaderboard no expone el SL/TP del leader, solo su posición — por eso hay un

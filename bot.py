@@ -97,13 +97,36 @@ def registrar_cierre(fila: dict):
 
 def cargar_baseline() -> dict:
     """Coins que el leader YA tenia abiertas cuando se lo empezo a seguir —
-    se excluyen del mirror para siempre (no se mirrorea un portfolio
-    preexistente, solo lo que el leader abra de ahi en mas)."""
+    se excluyen del mirror mientras sigan abiertas (no se mirrorea un portfolio
+    preexistente). Cuando el leader cierra una, sale del baseline y su proxima
+    apertura en esa coin ya se copia (ver liberar_baseline)."""
     return _leer_json(BASELINE_FILE, {"leader": "", "coins": []})
 
 
 def fijar_baseline(leader_address: str, leader_pos: dict):
     _escribir_json(BASELINE_FILE, {"leader": leader_address, "coins": list(leader_pos.keys())})
+
+
+_baseline_ausente: dict[str, int] = {}  # coin -> ciclos seguidos sin verla en el leader
+CICLOS_PARA_LIBERAR = 3
+
+
+def liberar_baseline(baseline: dict, leader_pos: dict) -> set:
+    """Saca del baseline las coins que el leader ya cerro, y persiste el cambio.
+    Exige CICLOS_PARA_LIBERAR ciclos seguidos sin la coin: si la API devuelve vacio
+    por un error transitorio, no se libera todo el portfolio de golpe.
+    Devuelve las coins que siguen excluidas."""
+    coins = set(baseline.get("coins", []))
+    for coin in coins:
+        _baseline_ausente[coin] = 0 if coin in leader_pos else _baseline_ausente.get(coin, 0) + 1
+    cerradas = {c for c in coins if _baseline_ausente[c] >= CICLOS_PARA_LIBERAR}
+    if cerradas:
+        for c in cerradas:
+            _baseline_ausente.pop(c, None)
+        coins -= cerradas
+        _escribir_json(BASELINE_FILE, {"leader": baseline["leader"], "coins": sorted(coins)})
+        log.info(f"Baseline: el leader cerro {', '.join(sorted(cerradas))} — desde ahora se copian")
+    return coins
 
 
 def con_reintentos(fn, *args, intentos: int = 3, espera: int = 2, **kwargs):
@@ -239,7 +262,7 @@ async def ciclo(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error cerrando {cierre['coin']} por stop-loss: {e}")
 
     baseline = cargar_baseline()
-    baseline_coins = set(baseline["coins"]) if baseline.get("leader") == leader_address else set()
+    baseline_coins = liberar_baseline(baseline, leader_pos) if baseline.get("leader") == leader_address else set()
     acciones = engine.calcular_acciones(leader_pos, nuestras_pos, baseline_coins)
 
     # Cierres (porque el leader salió) — siempre automaticos, salvo pausado
