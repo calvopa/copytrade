@@ -44,6 +44,12 @@ ART = timezone(timedelta(hours=-3))
 
 señales_pendientes: dict[str, dict] = {}  # id -> accion "abrir", para confirmacion en modo semi
 
+# coin -> ts de la ultima apertura fallida. En modo auto el loop recalcula la apertura cada ciclo:
+# sin esto una orden rechazada se reintenta (y se avisa por Telegram) cada POLL_INTERVAL_SECONDS.
+aperturas_fallidas: dict[str, float] = {}
+REINTENTO_APERTURA_SEG = 30 * 60
+NOTIONAL_MINIMO_USDC   = 10.0  # minimo por orden de Hyperliquid
+
 
 # ── Persistencia (mismo patron que cryptobot/bot.py: tmp -> rename atomico) ──
 
@@ -166,19 +172,39 @@ def _error_orden(resultado) -> str | None:
     return None
 
 
+async def _fallo_apertura(bot, chat_id: str, coin: str, motivo: str):
+    """Registra el fallo para no reintentar cada ciclo; avisa por Telegram solo el primero."""
+    log.error(f"No se pudo abrir {coin}: {motivo}")
+    if coin not in aperturas_fallidas:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"⚠️ No se pudo abrir {coin}: {motivo}\nSe reintenta cada {REINTENTO_APERTURA_SEG // 60} min sin volver a avisar.",
+        )
+    aperturas_fallidas[coin] = time.time()
+
+
 async def _abrir_mirror(exchange, bot, chat_id: str, accion: dict, meta: dict):
     coin = accion["coin"]
-    px_actual = None
+    # Precision y precio de NUESTRA red (testnet/mainnet): el leader es mainnet y no siempre coinciden.
+    info = hl.crear_info()
+    asset = info.coin_to_asset.get(info.name_to_coin.get(coin, ""))
+    if asset is None:
+        await _fallo_apertura(bot, chat_id, coin, "el coin no existe en la red de nuestra cuenta")
+        return
+    sz_decimals = info.asset_to_sz_decimals[asset]
     try:
-        info = hl.crear_info()
-        mids = info.all_mids()
-        px_actual = float(mids.get(coin, accion["leader_entry_px"]))
+        px_actual = float(info.all_mids().get(coin, accion["leader_entry_px"]))
     except Exception:
         px_actual = accion["leader_entry_px"]
 
-    sz = round(accion["notional_usdc"] / px_actual, 5) if px_actual else 0
+    if accion["notional_usdc"] < NOTIONAL_MINIMO_USDC:
+        await _fallo_apertura(bot, chat_id, coin, f"notional ${accion['notional_usdc']:.2f} menor al mínimo de ${NOTIONAL_MINIMO_USDC:.0f}")
+        return
+
+    # Hyperliquid rechaza ("Order has invalid size") tamaños con mas decimales que szDecimals del coin
+    sz = round(accion["notional_usdc"] / px_actual, sz_decimals) if px_actual else 0
     if sz <= 0:
-        log.warning(f"Tamaño calculado invalido para {coin}, se omite apertura")
+        await _fallo_apertura(bot, chat_id, coin, f"tamaño calculado inválido ({sz})")
         return
 
     try:
@@ -193,10 +219,10 @@ async def _abrir_mirror(exchange, bot, chat_id: str, accion: dict, meta: dict):
     if error:
         # Hyperliquid responde 200 aunque rechace la orden (sin margen, cuenta inexistente, etc.):
         # sin este chequeo se anunciaba "Mirror abierto" y se guardaba una posición que no existe.
-        log.error(f"Orden rechazada al abrir {coin}: {error}")
-        await bot.send_message(chat_id=chat_id, text=f"⚠️ No se pudo abrir {coin}: {error}")
+        await _fallo_apertura(bot, chat_id, coin, error)
         return
 
+    aperturas_fallidas.pop(coin, None)
     meta[coin] = {
         "abierto_ts":      datetime.now(ART).isoformat(),
         "leader_entry_px": accion["leader_entry_px"],
@@ -314,16 +340,21 @@ async def ciclo(context: ContextTypes.DEFAULT_TYPE):
                     log.error(f"Error cerrando mirror {cierre['coin']}: {e}")
                     await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error cerrando {cierre['coin']}: {e}")
 
+    # Fallos de coins que el leader ya cerro no cuentan para una futura reapertura
+    for c in [c for c in aperturas_fallidas if c not in leader_pos]:
+        aperturas_fallidas.pop(c)
+
     # Aperturas — dependen del modo
     for accion in acciones["abrir"]:
         if modo == "pausado":
             continue
         if modo == "auto":
+            if time.time() - aperturas_fallidas.get(accion["coin"], 0) < REINTENTO_APERTURA_SEG:
+                continue
             try:
                 await _abrir_mirror(exchange, context.bot, chat_id, accion, meta)
             except Exception as e:
-                log.error(f"Error abriendo mirror {accion['coin']}: {e}")
-                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Error abriendo {accion['coin']}: {e}")
+                await _fallo_apertura(context.bot, chat_id, accion["coin"], f"error: {e}")
         elif modo == "semi":
             ya_pendiente = any(v["coin"] == accion["coin"] for v in señales_pendientes.values())
             if ya_pendiente:
